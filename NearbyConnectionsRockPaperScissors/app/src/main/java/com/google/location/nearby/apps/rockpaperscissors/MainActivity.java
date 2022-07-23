@@ -3,8 +3,13 @@ package com.google.location.nearby.apps.rockpaperscissors;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import android.Manifest;
+import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import androidx.annotation.CallSuper;
@@ -12,6 +17,9 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 import androidx.appcompat.app.AppCompatActivity;
+
+import android.os.Handler;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -31,6 +39,10 @@ import com.google.android.gms.nearby.connection.PayloadCallback;
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate;
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate.Status;
 import com.google.android.gms.nearby.connection.Strategy;
+
+import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
+import java.io.InputStream;
 
 /** Activity controlling the Rock Paper Scissors game */
 public class MainActivity extends AppCompatActivity {
@@ -76,17 +88,7 @@ public class MainActivity extends AppCompatActivity {
 
   private static final Strategy STRATEGY = Strategy.P2P_STAR;
 
-  private enum GameChoice {
-    ROCK,
-    PAPER,
-    SCISSORS;
-
-    boolean beats(GameChoice other) {
-      return (this == GameChoice.ROCK && other == GameChoice.SCISSORS)
-          || (this == GameChoice.SCISSORS && other == GameChoice.PAPER)
-          || (this == GameChoice.PAPER && other == GameChoice.ROCK);
-    }
-  }
+  private static final int PICK_IMAGE = 1;
 
   // Our handle to Nearby Connections
   private ConnectionsClient connectionsClient;
@@ -96,35 +98,38 @@ public class MainActivity extends AppCompatActivity {
 
   private String opponentEndpointId;
   private String opponentName;
-  private int opponentScore;
-  private GameChoice opponentChoice;
-
-  private int myScore;
-  private GameChoice myChoice;
 
   private Button findOpponentButton;
   private Button disconnectButton;
-  private Button rockButton;
-  private Button paperButton;
-  private Button scissorsButton;
+  private Button imageButton;
 
   private TextView opponentText;
   private TextView statusText;
-  private TextView scoreText;
 
   // Callbacks for receiving payloads
   private final PayloadCallback payloadCallback =
       new PayloadCallback() {
         @Override
         public void onPayloadReceived(String endpointId, Payload payload) {
-          opponentChoice = GameChoice.valueOf(new String(payload.asBytes(), UTF_8));
+          InputStream imageStream = payload.asStream().asInputStream();
+
+          Bitmap imageBitmap = BitmapFactory.decodeStream(imageStream);
+
+          ByteArrayOutputStream imageBytes = new ByteArrayOutputStream();
+          imageBitmap.compress(Bitmap.CompressFormat.PNG, 50, imageBytes);
+          String imagePath = MediaStore.Images.Media.insertImage(getContentResolver(),
+                  imageBitmap, "Image", null);
+          Uri imageUri =  Uri.parse(imagePath);
+
+          Intent viewerIntent = new Intent();
+          viewerIntent.setAction(android.content.Intent.ACTION_VIEW);
+          viewerIntent.setDataAndType(imageUri, "image/png");
+          startActivity(viewerIntent);
         }
 
         @Override
         public void onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {
-          if (update.getStatus() == Status.SUCCESS && myChoice != null && opponentChoice != null) {
-            finishRound();
-          }
+          Log.i(TAG, "onPayloadTransferUpdate: update status=" + update);
         }
       };
 
@@ -182,13 +187,10 @@ public class MainActivity extends AppCompatActivity {
 
     findOpponentButton = findViewById(R.id.find_opponent);
     disconnectButton = findViewById(R.id.disconnect);
-    rockButton = findViewById(R.id.rock);
-    paperButton = findViewById(R.id.paper);
-    scissorsButton = findViewById(R.id.scissors);
+    imageButton = findViewById(R.id.image);
 
     opponentText = findViewById(R.id.opponent_name);
     statusText = findViewById(R.id.status);
-    scoreText = findViewById(R.id.score);
 
     TextView nameView = findViewById(R.id.name);
     nameView.setText(getString(R.string.codename, codeName));
@@ -209,8 +211,10 @@ public class MainActivity extends AppCompatActivity {
 
   @Override
   protected void onStop() {
-    connectionsClient.stopAllEndpoints();
-    resetGame();
+    // This callback is called when the image picker activity opens on top of us,
+    // so we can't stop the endpoint here
+    //connectionsClient.stopAllEndpoints();
+    //resetGame();
 
     super.onStop();
   }
@@ -264,23 +268,19 @@ public class MainActivity extends AppCompatActivity {
     resetGame();
   }
 
-  /** Sends a {@link GameChoice} to the other player. */
-  public void makeMove(View view) {
-    if (view.getId() == R.id.rock) {
-      sendGameChoice(GameChoice.ROCK);
-    } else if (view.getId() == R.id.paper) {
-      sendGameChoice(GameChoice.PAPER);
-    } else if (view.getId() == R.id.scissors) {
-      sendGameChoice(GameChoice.SCISSORS);
-    }
-  }
-
   /** Starts looking for other players using Nearby Connections. */
   private void startDiscovery() {
     // Note: Discovery may fail. To keep this demo simple, we don't handle failures.
     connectionsClient.startDiscovery(
             getPackageName(), endpointDiscoveryCallback,
             new DiscoveryOptions.Builder().setStrategy(STRATEGY).build());
+  }
+
+  /** Sends image to the other player. */
+  public void makeMove(View view) {
+    if (view.getId() == R.id.image) {
+      pickImage();
+    }
   }
 
   /** Broadcasts our presence using Nearby Connections so other players can find us. */
@@ -295,50 +295,9 @@ public class MainActivity extends AppCompatActivity {
   private void resetGame() {
     opponentEndpointId = null;
     opponentName = null;
-    opponentChoice = null;
-    opponentScore = 0;
-    myChoice = null;
-    myScore = 0;
-
     setOpponentName(getString(R.string.no_opponent));
     setStatusText(getString(R.string.status_disconnected));
-    updateScore(myScore, opponentScore);
     setButtonState(false);
-  }
-
-  /** Sends the user's selection of rock, paper, or scissors to the opponent. */
-  private void sendGameChoice(GameChoice choice) {
-    myChoice = choice;
-    connectionsClient.sendPayload(
-        opponentEndpointId, Payload.fromBytes(choice.name().getBytes(UTF_8)));
-
-    setStatusText(getString(R.string.game_choice, choice.name()));
-    // No changing your mind!
-    setGameChoicesEnabled(false);
-  }
-
-  /** Determines the winner and update game state/UI after both players have chosen. */
-  private void finishRound() {
-    if (myChoice.beats(opponentChoice)) {
-      // Win!
-      setStatusText(getString(R.string.win_message, myChoice.name(), opponentChoice.name()));
-      myScore++;
-    } else if (myChoice == opponentChoice) {
-      // Tie, same choice by both players
-      setStatusText(getString(R.string.tie_message, myChoice.name()));
-    } else {
-      // Loss
-      setStatusText(getString(R.string.loss_message, myChoice.name(), opponentChoice.name()));
-      opponentScore++;
-    }
-
-    myChoice = null;
-    opponentChoice = null;
-
-    updateScore(myScore, opponentScore);
-
-    // Ready for another round
-    setGameChoicesEnabled(true);
   }
 
   /** Enables/disables buttons depending on the connection status. */
@@ -352,9 +311,7 @@ public class MainActivity extends AppCompatActivity {
 
   /** Enables/disables the rock, paper, and scissors buttons. */
   private void setGameChoicesEnabled(boolean enabled) {
-    rockButton.setEnabled(enabled);
-    paperButton.setEnabled(enabled);
-    scissorsButton.setEnabled(enabled);
+    imageButton.setEnabled(enabled);
   }
 
   /** Shows a status message to the user. */
@@ -367,8 +324,30 @@ public class MainActivity extends AppCompatActivity {
     opponentText.setText(getString(R.string.opponent_name, opponentName));
   }
 
-  /** Updates the running score ticker. */
-  private void updateScore(int myScore, int opponentScore) {
-    scoreText.setText(getString(R.string.game_score, myScore, opponentScore));
+  private void pickImage() {
+    Intent pickerIntent = new Intent(Intent.ACTION_GET_CONTENT);
+    pickerIntent.setType("image/*");
+    startActivityForResult(pickerIntent, PICK_IMAGE);
+  }
+
+  /** Processes a started activity result */
+  @Override
+  public void onActivityResult(int requestCode, int resultCode, Intent data) {
+    super.onActivityResult(requestCode, resultCode, data);
+    if (requestCode == PICK_IMAGE && resultCode == Activity.RESULT_OK) {
+      if (data == null) {
+        //TODO - Display an error
+        return;
+      }
+      try {
+        InputStream imageStream = this.getContentResolver().openInputStream(data.getData());
+        Payload imagePayload = Payload.fromStream(imageStream);
+
+        connectionsClient.sendPayload(opponentEndpointId, imagePayload);
+
+      } catch (FileNotFoundException e) {
+        e.printStackTrace();
+      }
+    }
   }
 }
